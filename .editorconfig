@@ -1,0 +1,19 @@
+# Private EditorConfig Options
+
+root = true
+
+[*.{c,h,cpp,hpp,asm}]
+charset = utf-8-bom
+indent_style = space
+indent_size = 4
+trim_trailing_whitespace = true
+insert_final_newline = true
+
+[*.{editorconfig}]
+charset = utf-8
+
+[*.{gitattributes}]
+charset = utf-8
+
+[*.{gitignore}]
+charset = utf-8
