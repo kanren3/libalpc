@@ -3,12 +3,6 @@
 
 EXTERN_C_START
 
-#ifndef _WIN64
-#define ALPC_MAX_ALLOWED_MESSAGE_LENGTH 0xFFEF
-#else
-#define ALPC_MAX_ALLOWED_MESSAGE_LENGTH 0xFFFF
-#endif
-
 typedef struct _PORT_CONTEXT {
     CLIENT_ID ClientId;
     HANDLE CommunicationPortHandle;
@@ -64,17 +58,17 @@ UaSendSynchronousRequest (
     IN HANDLE CommunicationPortHandle,
     IN PVOID RequestDataBuffer,
     IN USHORT RequestDataLength,
-    OUT PVOID ReceiveDataBuffer,
-    IN USHORT ReceiveDataLength,
-    OUT PUSHORT NumberOfBytesReceive
+    OUT PVOID ResponseDataBuffer,
+    IN USHORT ResponseDataLength,
+    OUT PUSHORT NumberOfBytesResponse
 );
 
 NTSTATUS
 NTAPI
 UaSendDatagram (
     IN HANDLE CommunicationPortHandle,
-    IN PVOID DatagramBuffer,
-    IN USHORT DatagramLength
+    IN PVOID DatagramDataBuffer OPTIONAL,
+    IN USHORT DatagramDataLength
 );
 
 VOID

@@ -7,18 +7,12 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="runtime.c">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="libalpc.c">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="libalpc.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="runtime.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
