@@ -73,7 +73,7 @@ UaInitializePortAttributes (
     PortAttributes->MaxMessageLength = ALPC_MAX_ALLOWED_TOTAL_LENGTH;
 }
 
-NTSTATUS
+VOID
 NTAPI
 UaAlpcRequestHandler (
     IN PUA_SERVER Server
@@ -89,11 +89,9 @@ UaAlpcRequestHandler (
                               NULL,
                               NULL,
                               NULL);
-
-    return STATUS_SUCCESS;
 }
 
-NTSTATUS
+VOID
 NTAPI
 UaAlpcDatagramHandler (
     IN PUA_SERVER Server
@@ -101,23 +99,17 @@ UaAlpcDatagramHandler (
 {
     PALPC_CONTEXT_ATTR ContextAttribute;
 
-    ContextAttribute = AlpcGetMessageAttribute(Server->MessageAttributes,
-                                               ALPC_MESSAGE_CONTEXT_ATTRIBUTE);
-
-    if (NULL == ContextAttribute) {
-        return STATUS_UNSUCCESSFUL;
-    }
+    ContextAttribute = AlpcGetMessageAttribute(Server->MessageAttributes, ALPC_MESSAGE_CONTEXT_ATTRIBUTE);
+    RTL_ASSERT(NULL != ContextAttribute);
 
     Server->OnDatagram(Server->PortMessage);
 
     if (0 != (Server->PortMessage->u2.s2.Type & LPC_CONTINUATION_REQUIRED)) {
         NtAlpcCancelMessage(Server->ConnectionPortHandle, 0, ContextAttribute);
     }
-
-    return STATUS_SUCCESS;
 }
 
-NTSTATUS
+VOID
 NTAPI
 UaAlpcDisconnectHandler (
     IN PUA_SERVER Server
@@ -127,23 +119,18 @@ UaAlpcDisconnectHandler (
     PALPC_CONTEXT_ATTR ContextAttribute;
     PPORT_CONTEXT PortContext;
 
-    ContextAttribute = AlpcGetMessageAttribute(Server->MessageAttributes,
-                                               ALPC_MESSAGE_CONTEXT_ATTRIBUTE);
-
-    if (NULL == ContextAttribute) {
-        return STATUS_UNSUCCESSFUL;
-    }
+    ContextAttribute = AlpcGetMessageAttribute(Server->MessageAttributes, ALPC_MESSAGE_CONTEXT_ATTRIBUTE);
+    RTL_ASSERT(NULL != ContextAttribute);
 
     PortContext = ContextAttribute->PortContext;
 
     Status = NtClose(PortContext->CommunicationPortHandle);
+    RTL_ASSERT(NT_SUCCESS(Status));
 
     UaFreeHeap(PortContext);
-
-    return Status;
 }
 
-NTSTATUS
+VOID
 NTAPI
 UaAlpcConnectHandler (
     IN PUA_SERVER Server
@@ -176,7 +163,7 @@ UaAlpcConnectHandler (
                                              NULL,
                                              TRUE);
 
-            if (FALSE == NT_SUCCESS (Status)) {
+            if (FALSE == NT_SUCCESS(Status)) {
                 NtAlpcAcceptConnectPort(&CommunicationPortHandle,
                                         Server->ConnectionPortHandle,
                                         0,
@@ -213,40 +200,31 @@ UaAlpcConnectHandler (
                                 NULL,
                                 FALSE);
     }
-
-    return STATUS_SUCCESS;
 }
 
-NTSTATUS
+VOID
 NTAPI
 UaProcessMessage (
     IN PUA_SERVER Server
 )
 {
-    NTSTATUS Status;
-
     switch (LOBYTE(Server->PortMessage->u2.s2.Type)) {
     case LPC_REQUEST:
-        Status = UaAlpcRequestHandler(Server);
+        UaAlpcRequestHandler(Server);
         break;
     case LPC_DATAGRAM:
-        Status = UaAlpcDatagramHandler(Server);
+        UaAlpcDatagramHandler(Server);
         break;
     case LPC_PORT_CLOSED:
-        Status = UaAlpcDisconnectHandler(Server);
+        UaAlpcDisconnectHandler(Server);
         break;
     case LPC_CLIENT_DIED:
-        Status = UaAlpcDisconnectHandler(Server);
+        UaAlpcDisconnectHandler(Server);
         break;
     case LPC_CONNECTION_REQUEST:
-        Status = UaAlpcConnectHandler(Server);
-        break;
-    default:
-        Status = STATUS_SUCCESS;
+        UaAlpcConnectHandler(Server);
         break;
     }
-
-    return Status;
 }
 
 NTSTATUS
@@ -274,11 +252,7 @@ UaServerWorker (
             break;
         }
 
-        Status = UaProcessMessage(Server);
-
-        if (FALSE == NT_SUCCESS(Status)) {
-            break;
-        }
+        UaProcessMessage(Server);
     }
 
     return STATUS_SUCCESS;
