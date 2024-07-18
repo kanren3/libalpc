@@ -91,22 +91,55 @@ UaAlpcRequestHandler (
                               NULL);
 }
 
+ULONG64 DatagramCounter;
+
+#define ALPC_VIEWFLG_UNMAP_EXISTING        0x00010000
+#define ALPC_VIEWFLG_AUTO_RELEASE          0x00020000
+#define ALPC_VIEWFLG_SECURED_ACCESS        0x00040000
+
 VOID
 NTAPI
 UaAlpcDatagramHandler (
     IN PUA_SERVER Server
 )
 {
+    NTSTATUS Status;
+    PALPC_DATA_VIEW_ATTR DataViewAttribute;
     PALPC_CONTEXT_ATTR ContextAttribute;
+
+    DataViewAttribute = AlpcGetMessageAttribute(Server->MessageAttributes, ALPC_MESSAGE_VIEW_ATTRIBUTE);
+    RTL_ASSERT(NULL != DataViewAttribute);
 
     ContextAttribute = AlpcGetMessageAttribute(Server->MessageAttributes, ALPC_MESSAGE_CONTEXT_ATTRIBUTE);
     RTL_ASSERT(NULL != ContextAttribute);
 
-    Server->OnDatagram(Server->PortMessage);
+    if (0 != (Server->MessageAttributes->ValidAttributes & ALPC_MESSAGE_VIEW_ATTRIBUTE)) {
+        PULONG Data = (PULONG)(DataViewAttribute->ViewBase);
+        printf("Big Counter:%lld Data:%x\n", DatagramCounter++, *Data);
 
-    if (0 != (Server->PortMessage->u2.s2.Type & LPC_CONTINUATION_REQUIRED)) {
-        NtAlpcCancelMessage(Server->ConnectionPortHandle, 0, ContextAttribute);
+        Status = NtAlpcDeleteSectionView(Server->ConnectionPortHandle, 0, DataViewAttribute->ViewBase);
+
+        if (0 != (Server->PortMessage->u2.s2.Type & LPC_CONTINUATION_REQUIRED)) {
+            Status = NtAlpcSendWaitReceivePort(Server->ConnectionPortHandle,
+                                               ALPC_MSGFLG_RELEASE_MESSAGE,
+                                               Server->PortMessage,
+                                               Server->MessageAttributes,
+                                               NULL,
+                                               NULL,
+                                               NULL,
+                                               NULL);
+        }
     }
+    else {
+        PULONG Data = (PULONG)(Server->PortMessage + 1);
+        printf("Small Counter:%lld Data:%x\n", DatagramCounter++, *Data);
+
+        if (0 != (Server->PortMessage->u2.s2.Type & LPC_CONTINUATION_REQUIRED)) {
+            NtAlpcCancelMessage(Server->ConnectionPortHandle, 0, ContextAttribute);
+        }
+    }
+
+    Server->OnDatagram(Server->PortMessage);
 }
 
 VOID
@@ -223,6 +256,9 @@ UaProcessMessage (
         break;
     case LPC_CONNECTION_REQUEST:
         UaAlpcConnectHandler(Server);
+        break;
+    default:
+        __debugbreak();
         break;
     }
 }
@@ -373,13 +409,13 @@ Cleanup:
 
 NTSTATUS
 NTAPI
-UaSendSynchronousRequest (
+UaSendSectionSynchronousRequest (
     IN HANDLE CommunicationPortHandle,
     IN PVOID RequestDataBuffer,
-    IN USHORT RequestDataLength,
+    IN ULONG RequestDataLength,
     OUT PVOID ResponseDataBuffer,
-    IN USHORT ResponseDataLength,
-    OUT PUSHORT NumberOfBytesResponse
+    IN ULONG ResponseDataLength,
+    OUT PULONG NumberOfBytesResponse
 )
 {
     NTSTATUS Status;
@@ -398,7 +434,7 @@ UaSendSynchronousRequest (
     }
 
     RequestMessage->u1.s1.TotalLength = (USHORT)(RequestMessageLength);
-    RequestMessage->u1.s1.DataLength = RequestDataLength;
+    RequestMessage->u1.s1.DataLength = (USHORT)(RequestDataLength);
 
     if (NULL != RequestMessage) {
         RtlCopyMemory(RequestMessage + 1, RequestDataBuffer, RequestDataLength);
@@ -425,10 +461,187 @@ UaSendSynchronousRequest (
 
 NTSTATUS
 NTAPI
+UaSendSynchronousRequest (
+    IN HANDLE CommunicationPortHandle,
+    IN PVOID RequestDataBuffer,
+    IN ULONG RequestDataLength,
+    OUT PVOID ResponseDataBuffer,
+    IN ULONG ResponseDataLength,
+    OUT PULONG NumberOfBytesResponse
+)
+{
+    NTSTATUS Status;
+    SIZE_T RequestMessageLength;
+    PPORT_MESSAGE RequestMessage;
+
+    if (MAX(RequestDataLength, ResponseDataLength) > ALPC_MAX_ALLOWED_DATA_LENGTH) {
+        return UaSendSectionSynchronousRequest(CommunicationPortHandle,
+                                               RequestDataBuffer,
+                                               RequestDataLength,
+                                               ResponseDataBuffer,
+                                               ResponseDataLength,
+                                               NumberOfBytesResponse);
+    }
+
+    RequestMessageLength = sizeof(PORT_MESSAGE) + MAX(RequestDataLength, ResponseDataLength);
+    RequestMessage = UaAllocateZeroHeap(RequestMessageLength);
+
+    if (NULL == RequestMessage) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    RequestMessage->u1.s1.TotalLength = (USHORT)(RequestMessageLength);
+    RequestMessage->u1.s1.DataLength = (USHORT)(RequestDataLength);
+
+    if (NULL != RequestMessage) {
+        RtlCopyMemory(RequestMessage + 1, RequestDataBuffer, RequestDataLength);
+    }
+
+    Status = NtAlpcSendWaitReceivePort(CommunicationPortHandle,
+                                       ALPC_MSGFLG_SYNC_REQUEST,
+                                       RequestMessage,
+                                       NULL,
+                                       RequestMessage,
+                                       &RequestMessageLength,
+                                       NULL,
+                                       NULL);
+
+    if (FALSE != NT_SUCCESS(Status)) {
+        *NumberOfBytesResponse = RequestMessage->u1.s1.DataLength;
+        RtlCopyMemory(ResponseDataBuffer, RequestMessage + 1, RequestMessage->u1.s1.DataLength);
+    }
+
+    UaFreeHeap(RequestMessage);
+
+    return Status;
+}
+
+NTSTATUS
+NTAPI
+UaSendSectionDatagram (
+    IN HANDLE CommunicationPortHandle,
+    IN PVOID DatagramDataBuffer OPTIONAL,
+    IN ULONG DatagramDataLength
+)
+{
+    NTSTATUS Status;
+    SIZE_T DatagramMessageLength;
+    PPORT_MESSAGE DatagramMessage = NULL;
+    PALPC_MESSAGE_ATTRIBUTES MessageAttributes = NULL;
+    SIZE_T MessageAttributesSize;
+    SIZE_T RequiredBufferSize;
+    PALPC_DATA_VIEW_ATTR DataViewAttribute;
+    ALPC_HANDLE SectionHandle = NULL;
+    SIZE_T ActualSectionSize;
+
+    DatagramMessageLength = sizeof(PORT_MESSAGE);
+    DatagramMessage = UaAllocateZeroHeap(DatagramMessageLength);
+
+    if (NULL == DatagramMessage) {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Cleanup;
+    }
+
+    DatagramMessage->u1.s1.TotalLength = (USHORT)(DatagramMessageLength);
+    DatagramMessage->u1.s1.DataLength = 0;
+
+    MessageAttributesSize = AlpcGetHeaderSize(ALPC_MESSAGE_VIEW_ATTRIBUTE);
+    MessageAttributes = UaAllocateZeroHeap(MessageAttributesSize);
+
+    if (NULL == MessageAttributes) {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Cleanup;
+    }
+
+    Status = AlpcInitializeMessageAttribute(ALPC_MESSAGE_VIEW_ATTRIBUTE,
+                                            MessageAttributes,
+                                            MessageAttributesSize,
+                                            &RequiredBufferSize);
+
+    if (FALSE == NT_SUCCESS(Status)) {
+        goto Cleanup;
+    }
+
+    Status = NtAlpcCreatePortSection(CommunicationPortHandle,
+                                     0,
+                                     NULL,
+                                     DatagramDataLength,
+                                     &SectionHandle,
+                                     &ActualSectionSize);
+
+    if (FALSE == NT_SUCCESS(Status)) {
+        goto Cleanup;
+    }
+
+    MessageAttributes->ValidAttributes |= ALPC_MESSAGE_VIEW_ATTRIBUTE;
+
+    DataViewAttribute = AlpcGetMessageAttribute(MessageAttributes, ALPC_MESSAGE_VIEW_ATTRIBUTE);
+    RTL_ASSERT(NULL != DataViewAttribute);
+
+    DataViewAttribute->SectionHandle = SectionHandle;
+    DataViewAttribute->ViewBase = NULL;
+    DataViewAttribute->ViewSize = DatagramDataLength;
+    DataViewAttribute->Flags = 0;
+
+    Status = NtAlpcCreateSectionView(CommunicationPortHandle, 0, DataViewAttribute);
+
+    if (FALSE == NT_SUCCESS(Status)) {
+        goto Cleanup;
+    }
+
+    if (NULL != DatagramDataBuffer) {
+        RtlCopyMemory(DataViewAttribute->ViewBase, DatagramDataBuffer, DatagramDataLength);
+    }
+
+    DataViewAttribute->Flags = ALPC_VIEWFLG_UNMAP_EXISTING;
+
+    Status = NtAlpcSendWaitReceivePort(CommunicationPortHandle,
+                                       ALPC_MSGFLG_RELEASE_MESSAGE,
+                                       DatagramMessage,
+                                       MessageAttributes,
+                                       NULL,
+                                       &DatagramMessageLength,
+                                       NULL,
+                                       NULL);
+
+    if (FALSE == NT_SUCCESS(Status)) {
+        goto Cleanup;
+    }
+
+    Status = NtAlpcDeleteSectionView(CommunicationPortHandle, 0, DataViewAttribute->ViewBase);
+    RTL_ASSERT(NT_SUCCESS(Status));
+
+    Status = NtAlpcDeletePortSection(CommunicationPortHandle, 0, SectionHandle);
+    RTL_ASSERT(NT_SUCCESS(Status));
+
+    UaFreeHeap(MessageAttributes);
+    UaFreeHeap(DatagramMessage);
+
+    return STATUS_SUCCESS;
+
+Cleanup:
+
+    if (NULL != SectionHandle) {
+        NtAlpcDeletePortSection(CommunicationPortHandle, 0, SectionHandle);
+    }
+
+    if (NULL != MessageAttributes) {
+        UaFreeHeap(MessageAttributes);
+    }
+
+    if (NULL != DatagramMessage) {
+        UaFreeHeap(DatagramMessage);
+    }
+
+    return Status;
+}
+
+NTSTATUS
+NTAPI
 UaSendDatagram (
     IN HANDLE CommunicationPortHandle,
     IN PVOID DatagramDataBuffer OPTIONAL,
-    IN USHORT DatagramDataLength
+    IN ULONG DatagramDataLength
 )
 {
     NTSTATUS Status;
@@ -436,7 +649,9 @@ UaSendDatagram (
     PPORT_MESSAGE DatagramMessage;
 
     if (DatagramDataLength > ALPC_MAX_ALLOWED_DATA_LENGTH) {
-        return STATUS_BUFFER_OVERFLOW;
+        return UaSendSectionDatagram(CommunicationPortHandle,
+                                     DatagramDataBuffer,
+                                     DatagramDataLength);
     }
 
     DatagramMessageLength = sizeof(PORT_MESSAGE) + DatagramDataLength;
@@ -447,7 +662,7 @@ UaSendDatagram (
     }
 
     DatagramMessage->u1.s1.TotalLength = (USHORT)(DatagramMessageLength);
-    DatagramMessage->u1.s1.DataLength = DatagramDataLength;
+    DatagramMessage->u1.s1.DataLength = (USHORT)(DatagramDataLength);
 
     if (NULL != DatagramDataBuffer) {
         RtlCopyMemory(DatagramMessage + 1, DatagramDataBuffer, DatagramDataLength);
@@ -458,7 +673,7 @@ UaSendDatagram (
                                        DatagramMessage,
                                        NULL,
                                        NULL,
-                                       NULL,
+                                       &DatagramMessageLength,
                                        NULL,
                                        NULL);
 
@@ -501,10 +716,10 @@ UaConnectServer (
     if (NULL == ConnectionMessage) {
         return STATUS_INSUFFICIENT_RESOURCES;
     }
-    
+
     ConnectionMessage->u1.s1.TotalLength = (USHORT)(ConnectionMessageLength);
     ConnectionMessage->u1.s1.DataLength = ConnectionDataLength;
-    
+
     if (NULL != ConnectionDataBuffer) {
         RtlCopyMemory(ConnectionMessage + 1, ConnectionDataBuffer, ConnectionDataLength);
     }
@@ -532,4 +747,63 @@ UaConnectServer (
     UaFreeHeap(ConnectionMessage);
 
     return Status;
+}
+
+VOID
+NTAPI
+OnRequest (
+    IN OUT PPORT_MESSAGE PortMessage
+)
+{
+
+}
+
+VOID
+NTAPI
+OnDatagram (
+    IN PPORT_MESSAGE PortMessage
+)
+{
+
+}
+
+BOOLEAN
+NTAPI
+OnConnect (
+    IN PPORT_MESSAGE PortMessage
+)
+{
+    return TRUE;
+}
+
+UNICODE_STRING TestPortName = RTL_CONSTANT_STRING(L"\\TestPortName");
+
+int main(int argc, char *argv[])
+{
+    PUA_SERVER Server = UaCreateServer(&TestPortName, OnRequest, OnDatagram, OnConnect);
+
+    Sleep(200);
+
+    HANDLE CommunicationPortHandle;
+    NTSTATUS Status = UaConnectServer(&CommunicationPortHandle, &TestPortName, NULL, 0);
+
+    UCHAR Data[ALPC_MAX_ALLOWED_DATA_LENGTH + 1] = { 0x11, 0x22, 0x33, 0x44 };
+
+    for (int i = 0; i < 10000; i++) {
+        UaSendDatagram(CommunicationPortHandle, Data, ALPC_MAX_ALLOWED_DATA_LENGTH + 1);
+    }
+
+
+
+    //    ULONG NumberOfBytesResponse;
+    //    UaSendSynchronousRequest(CommunicationPortHandle,
+    //                             Data,
+    //                             ALPC_MAX_ALLOWED_DATA_LENGTH,
+    //                             Data,
+    //                             ALPC_MAX_ALLOWED_DATA_LENGTH,
+    //                             &NumberOfBytesResponse);
+
+
+    getchar();
+    return 0;
 }

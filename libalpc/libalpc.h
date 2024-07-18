@@ -57,10 +57,10 @@ NTAPI
 UaSendSynchronousRequest (
     IN HANDLE CommunicationPortHandle,
     IN PVOID RequestDataBuffer,
-    IN USHORT RequestDataLength,
+    IN ULONG RequestDataLength,
     OUT PVOID ResponseDataBuffer,
-    IN USHORT ResponseDataLength,
-    OUT PUSHORT NumberOfBytesResponse
+    IN ULONG ResponseDataLength,
+    OUT PULONG NumberOfBytesResponse
 );
 
 NTSTATUS
@@ -68,7 +68,7 @@ NTAPI
 UaSendDatagram (
     IN HANDLE CommunicationPortHandle,
     IN PVOID DatagramDataBuffer OPTIONAL,
-    IN USHORT DatagramDataLength
+    IN ULONG DatagramDataLength
 );
 
 VOID
