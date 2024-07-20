@@ -8,6 +8,11 @@ typedef struct _PORT_CONTEXT {
     HANDLE CommunicationPortHandle;
 } PORT_CONTEXT, *PPORT_CONTEXT;
 
+typedef struct _PORT_SECTION_MESSAGE {
+    PORT_MESSAGE MessageHeader;
+    ULONG ValidDataLength;
+} PORT_SECTION_MESSAGE, *PPORT_SECTION_MESSAGE;
+
 typedef
 VOID
 (NTAPI *REQUEST_PROCEDURE)(
