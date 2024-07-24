@@ -616,7 +616,7 @@ UaSendSectionSynchronousRequest (
         }
 
         if (NULL != ResponseBuffer) {
-            RtlCopyMemory(ResponseBuffer, RequestMessage + 1, RequestMessage->NumberOfResponse);
+            RtlCopyMemory(ResponseBuffer, DataViewAttribute->ViewBase, RequestMessage->NumberOfResponse);
         }
     }
 
