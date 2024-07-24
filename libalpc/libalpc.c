@@ -3,14 +3,46 @@
 
 #ifndef _WIN64
 #define ALPC_MAX_ALLOWED_TOTAL_LENGTH (0xFFEF)
-#define ALPC_MAX_ALLOWED_DATA_LENGTH  (ALPC_MAX_ALLOWED_TOTAL_LENGTH - sizeof(PORT_MESSAGE))
 #else
 #define ALPC_MAX_ALLOWED_TOTAL_LENGTH (0xFFFF)
-#define ALPC_MAX_ALLOWED_DATA_LENGTH  (ALPC_MAX_ALLOWED_TOTAL_LENGTH - sizeof(PORT_MESSAGE))
 #endif
 
 #define MAX(a,b) (((a) > (b)) ? (a) : (b))
 #define MIN(a,b) (((a) < (b)) ? (a) : (b))
+
+typedef struct _PORT_CONTEXT {
+    CLIENT_ID ClientId;
+    HANDLE CommunicationPortHandle;
+} PORT_CONTEXT, *PPORT_CONTEXT;
+
+typedef struct _REQUEST_PORT_MESSAGE {
+    PORT_MESSAGE Header;
+    ULONG RequestBufferLength;
+    ULONG ResponseBufferLength;
+    ULONG NumberOfResponse;
+    NTSTATUS ResponseStatus;
+} REQUEST_PORT_MESSAGE, *PREQUEST_PORT_MESSAGE;
+
+typedef struct _DATAGRAM_PORT_MESSAGE {
+    PORT_MESSAGE Header;
+    ULONG DatagramBufferLength;
+} DATAGRAM_PORT_MESSAGE, *PDATAGRAM_PORT_MESSAGE;
+
+typedef struct _CONNECTION_PORT_MESSAGE {
+    PORT_MESSAGE Header;
+    USHORT ConnectionBufferLength;
+} CONNECTION_PORT_MESSAGE, *PCONNECTION_PORT_MESSAGE;
+
+typedef struct _UA_SERVER {
+    REQUEST_PROCEDURE OnRequest;
+    DATAGRAM_PROCEDURE OnDatagram;
+    CONNECTION_PROCEDURE OnConnect;
+    PPORT_MESSAGE PortMessage;
+    ALPC_PORT_ATTRIBUTES PortAttributes;
+    PALPC_MESSAGE_ATTRIBUTES MessageAttributes;
+    HANDLE ConnectionPortHandle;
+    HANDLE ServerThreadHandle;
+} UA_SERVER, *PUA_SERVER;
 
 PVOID
 NTAPI
@@ -81,13 +113,49 @@ UaAlpcRequestHandler (
 {
     NTSTATUS Status;
     PALPC_DATA_VIEW_ATTR DataViewAttribute;
+    PREQUEST_PORT_MESSAGE RequestMessage;
+    ULONG MaxBufferLength;
+    ULONG TotalLength;
+    PVOID ShareBuffer;
 
     DataViewAttribute = AlpcGetMessageAttribute(Server->MessageAttributes, ALPC_MESSAGE_VIEW_ATTRIBUTE);
     RTL_ASSERT(NULL != DataViewAttribute);
 
+    RequestMessage = CONTAINING_RECORD(Server->PortMessage, REQUEST_PORT_MESSAGE, Header);
+
+    MaxBufferLength = MAX(RequestMessage->RequestBufferLength, RequestMessage->ResponseBufferLength);
+
     if (0 != (Server->MessageAttributes->ValidAttributes & ALPC_MESSAGE_VIEW_ATTRIBUTE)) {
+        if (MaxBufferLength <= DataViewAttribute->ViewSize) {
+            ShareBuffer = DataViewAttribute->ViewBase;
+
+            Status = Server->OnRequest(&RequestMessage->Header.ClientId,
+                                       ShareBuffer,
+                                       RequestMessage->RequestBufferLength,
+                                       RequestMessage->ResponseBufferLength,
+                                       &RequestMessage->NumberOfResponse);
+
+            RequestMessage->ResponseStatus = Status;
+        }
+
+
         Status = NtAlpcDeleteSectionView(Server->ConnectionPortHandle, 0, DataViewAttribute->ViewBase);
         RTL_ASSERT(NT_SUCCESS(Status));
+    }
+    else {
+        TotalLength = (USHORT)(RequestMessage->Header.u1.s1.TotalLength);
+
+        if (MaxBufferLength + sizeof(REQUEST_PORT_MESSAGE) == TotalLength) {
+            ShareBuffer = RequestMessage + 1;
+
+            Status = Server->OnRequest(&RequestMessage->Header.ClientId,
+                                       ShareBuffer,
+                                       RequestMessage->RequestBufferLength,
+                                       RequestMessage->ResponseBufferLength,
+                                       &RequestMessage->NumberOfResponse);
+
+            RequestMessage->ResponseStatus = Status;
+        }
     }
 
     NtAlpcSendWaitReceivePort(Server->ConnectionPortHandle,
@@ -109,6 +177,9 @@ UaAlpcDatagramHandler (
     NTSTATUS Status;
     PALPC_DATA_VIEW_ATTR DataViewAttribute;
     PALPC_CONTEXT_ATTR ContextAttribute;
+    PDATAGRAM_PORT_MESSAGE DatagramMessage;
+    PVOID DatagramBuffer;
+    ULONG TotalLength;
 
     DataViewAttribute = AlpcGetMessageAttribute(Server->MessageAttributes, ALPC_MESSAGE_VIEW_ATTRIBUTE);
     RTL_ASSERT(NULL != DataViewAttribute);
@@ -116,7 +187,17 @@ UaAlpcDatagramHandler (
     ContextAttribute = AlpcGetMessageAttribute(Server->MessageAttributes, ALPC_MESSAGE_CONTEXT_ATTRIBUTE);
     RTL_ASSERT(NULL != ContextAttribute);
 
+    DatagramMessage = CONTAINING_RECORD(Server->PortMessage, DATAGRAM_PORT_MESSAGE, Header);
+
     if (0 != (Server->MessageAttributes->ValidAttributes & ALPC_MESSAGE_VIEW_ATTRIBUTE)) {
+        if (DatagramMessage->DatagramBufferLength <= DataViewAttribute->ViewSize) {
+            DatagramBuffer = DataViewAttribute->ViewBase;
+
+            Server->OnDatagram(&DatagramMessage->Header.ClientId,
+                               DatagramBuffer,
+                               DatagramMessage->DatagramBufferLength);
+        }
+
         Status = NtAlpcDeleteSectionView(Server->ConnectionPortHandle, 0, DataViewAttribute->ViewBase);
         RTL_ASSERT(NT_SUCCESS(Status));
 
@@ -132,6 +213,16 @@ UaAlpcDatagramHandler (
         }
     }
     else {
+        TotalLength = (USHORT)(DatagramMessage->Header.u1.s1.TotalLength);
+
+        if (DatagramMessage->DatagramBufferLength + sizeof(DATAGRAM_PORT_MESSAGE) == TotalLength) {
+            DatagramBuffer = DatagramMessage + 1;
+
+            Server->OnDatagram(&DatagramMessage->Header.ClientId,
+                               DatagramBuffer,
+                               DatagramMessage->DatagramBufferLength);
+        }
+
         if (0 != (Server->PortMessage->u2.s2.Type & LPC_CONTINUATION_REQUIRED)) {
             NtAlpcCancelMessage(Server->ConnectionPortHandle, 0, ContextAttribute);
         }
@@ -166,6 +257,9 @@ UaAlpcConnectHandler (
 )
 {
     NTSTATUS Status;
+    PCONNECTION_PORT_MESSAGE ConnectionMessage;
+    ULONG TotalLength;
+    BOOLEAN AcceptConnect;
     PPORT_CONTEXT PortContext;
     OBJECT_ATTRIBUTES ObjectAttributes;
     HANDLE CommunicationPortHandle;
@@ -176,11 +270,24 @@ UaAlpcConnectHandler (
                                NULL,
                                NULL);
 
-    if (FALSE != Server->OnConnect(Server->PortMessage)) {
+    ConnectionMessage = CONTAINING_RECORD(Server->PortMessage, CONNECTION_PORT_MESSAGE, Header);
+
+    TotalLength = (USHORT)(ConnectionMessage->Header.u1.s1.TotalLength);
+
+    if (ConnectionMessage->ConnectionBufferLength + sizeof(CONNECTION_PORT_MESSAGE) != TotalLength) {
+        AcceptConnect = FALSE;
+    }
+    else {
+        AcceptConnect = Server->OnConnect(&ConnectionMessage->Header.ClientId,
+                                          ConnectionMessage + 1,
+                                          ConnectionMessage->ConnectionBufferLength);
+    }
+
+    if (FALSE != AcceptConnect) {
         PortContext = UaAllocateZeroHeap(sizeof(PORT_CONTEXT));
 
         if (NULL != PortContext) {
-            PortContext->ClientId = Server->PortMessage->ClientId;
+            PortContext->ClientId = ConnectionMessage->Header.ClientId;
 
             Status = NtAlpcAcceptConnectPort(&PortContext->CommunicationPortHandle,
                                              Server->ConnectionPortHandle,
@@ -188,7 +295,7 @@ UaAlpcConnectHandler (
                                              &ObjectAttributes,
                                              &Server->PortAttributes,
                                              PortContext,
-                                             Server->PortMessage,
+                                             &ConnectionMessage->Header,
                                              NULL,
                                              TRUE);
 
@@ -199,7 +306,7 @@ UaAlpcConnectHandler (
                                         &ObjectAttributes,
                                         &Server->PortAttributes,
                                         NULL,
-                                        Server->PortMessage,
+                                        &ConnectionMessage->Header,
                                         NULL,
                                         FALSE);
 
@@ -213,7 +320,7 @@ UaAlpcConnectHandler (
                                     &ObjectAttributes,
                                     &Server->PortAttributes,
                                     NULL,
-                                    Server->PortMessage,
+                                    &ConnectionMessage->Header,
                                     NULL,
                                     FALSE);
         }
@@ -225,7 +332,7 @@ UaAlpcConnectHandler (
                                 &ObjectAttributes,
                                 &Server->PortAttributes,
                                 NULL,
-                                Server->PortMessage,
+                                &ConnectionMessage->Header,
                                 NULL,
                                 FALSE);
     }
@@ -404,16 +511,17 @@ NTSTATUS
 NTAPI
 UaSendSectionSynchronousRequest (
     IN HANDLE CommunicationPortHandle,
-    IN PVOID RequestDataBuffer,
-    IN ULONG RequestDataLength,
-    OUT PVOID ResponseDataBuffer,
-    IN ULONG ResponseDataLength,
-    OUT PULONG NumberOfBytesResponse
+    IN PVOID RequestBuffer,
+    IN ULONG RequestBufferLength,
+    OUT PVOID ResponseBuffer,
+    IN ULONG ResponseBufferLength,
+    OUT PULONG NumberOfResponse OPTIONAL,
+    OUT PNTSTATUS ResponseStatus OPTIONAL
 )
 {
     NTSTATUS Status;
-    SIZE_T SectionRequestMessageLength;
-    PPORT_SECTION_MESSAGE SectionRequestMessage = NULL;
+    SIZE_T RequestMessageLength;
+    PREQUEST_PORT_MESSAGE RequestMessage = NULL;
     PALPC_MESSAGE_ATTRIBUTES MessageAttributes = NULL;
     SIZE_T MessageAttributesSize;
     SIZE_T RequiredBufferSize;
@@ -421,18 +529,19 @@ UaSendSectionSynchronousRequest (
     ALPC_HANDLE SectionHandle = NULL;
     SIZE_T ActualSectionSize;
 
-    SectionRequestMessageLength = sizeof(PORT_SECTION_MESSAGE);
-    SectionRequestMessage = UaAllocateZeroHeap(SectionRequestMessageLength);
+    RequestMessageLength = sizeof(REQUEST_PORT_MESSAGE);
+    RequestMessage = UaAllocateZeroHeap(RequestMessageLength);
 
-    if (NULL == SectionRequestMessage) {
+    if (NULL == RequestMessage) {
         Status = STATUS_INSUFFICIENT_RESOURCES;
         goto Cleanup;
     }
 
-    SectionRequestMessage->MessageHeader.u1.s1.TotalLength = (USHORT)(SectionRequestMessageLength);
-    SectionRequestMessage->MessageHeader.u1.s1.DataLength = (USHORT)(SectionRequestMessageLength - sizeof(PORT_MESSAGE));
+    RequestMessage->Header.u1.s1.TotalLength = (USHORT)(RequestMessageLength);
+    RequestMessage->Header.u1.s1.DataLength = (USHORT)(RequestMessageLength - sizeof(PORT_MESSAGE));
 
-    SectionRequestMessage->ValidDataLength = MAX(RequestDataLength, ResponseDataLength);
+    RequestMessage->RequestBufferLength = RequestBufferLength;
+    RequestMessage->ResponseBufferLength = ResponseBufferLength;
 
     MessageAttributesSize = AlpcGetHeaderSize(ALPC_MESSAGE_VIEW_ATTRIBUTE);
     MessageAttributes = UaAllocateZeroHeap(MessageAttributesSize);
@@ -454,7 +563,7 @@ UaSendSectionSynchronousRequest (
     Status = NtAlpcCreatePortSection(CommunicationPortHandle,
                                      0,
                                      NULL,
-                                     MAX(RequestDataLength, ResponseDataLength),
+                                     MAX(RequestBufferLength, ResponseBufferLength),
                                      &SectionHandle,
                                      &ActualSectionSize);
 
@@ -469,7 +578,7 @@ UaSendSectionSynchronousRequest (
 
     DataViewAttribute->SectionHandle = SectionHandle;
     DataViewAttribute->ViewBase = NULL;
-    DataViewAttribute->ViewSize = MAX(RequestDataLength, ResponseDataLength);
+    DataViewAttribute->ViewSize = MAX(RequestBufferLength, ResponseBufferLength);
     DataViewAttribute->Flags = 0;
 
     Status = NtAlpcCreateSectionView(CommunicationPortHandle, 0, DataViewAttribute);
@@ -478,18 +587,18 @@ UaSendSectionSynchronousRequest (
         goto Cleanup;
     }
 
-    if (NULL != RequestDataBuffer) {
-        RtlCopyMemory(DataViewAttribute->ViewBase, RequestDataBuffer, RequestDataLength);
+    if (NULL != RequestBuffer) {
+        RtlCopyMemory(DataViewAttribute->ViewBase, RequestBuffer, RequestBufferLength);
     }
 
     DataViewAttribute->Flags = ALPC_VIEWFLG_UNMAP_EXISTING;
 
     Status = NtAlpcSendWaitReceivePort(CommunicationPortHandle,
                                        ALPC_MSGFLG_SYNC_REQUEST,
-                                       &SectionRequestMessage->MessageHeader,
+                                       &RequestMessage->Header,
                                        MessageAttributes,
-                                       &SectionRequestMessage->MessageHeader,
-                                       &SectionRequestMessageLength,
+                                       &RequestMessage->Header,
+                                       &RequestMessageLength,
                                        NULL,
                                        NULL);
 
@@ -498,8 +607,17 @@ UaSendSectionSynchronousRequest (
     }
 
     if (FALSE != NT_SUCCESS(Status)) {
-        *NumberOfBytesResponse = SectionRequestMessage->ValidDataLength;
-        RtlCopyMemory(ResponseDataBuffer, DataViewAttribute->ViewBase, SectionRequestMessage->ValidDataLength);
+        if (NULL != NumberOfResponse) {
+            *NumberOfResponse = RequestMessage->NumberOfResponse;
+        }
+
+        if (NULL != ResponseStatus) {
+            *ResponseStatus = RequestMessage->ResponseStatus;
+        }
+
+        if (NULL != ResponseBuffer) {
+            RtlCopyMemory(ResponseBuffer, RequestMessage + 1, RequestMessage->NumberOfResponse);
+        }
     }
 
     Status = NtAlpcDeleteSectionView(CommunicationPortHandle, 0, DataViewAttribute->ViewBase);
@@ -509,7 +627,7 @@ UaSendSectionSynchronousRequest (
     RTL_ASSERT(NT_SUCCESS(Status));
 
     UaFreeHeap(MessageAttributes);
-    UaFreeHeap(SectionRequestMessage);
+    UaFreeHeap(RequestMessage);
 
     return STATUS_SUCCESS;
 
@@ -523,8 +641,8 @@ Cleanup:
         UaFreeHeap(MessageAttributes);
     }
 
-    if (NULL != SectionRequestMessage) {
-        UaFreeHeap(SectionRequestMessage);
+    if (NULL != RequestMessage) {
+        UaFreeHeap(RequestMessage);
     }
 
     return Status;
@@ -534,52 +652,69 @@ NTSTATUS
 NTAPI
 UaSendSynchronousRequest (
     IN HANDLE CommunicationPortHandle,
-    IN PVOID RequestDataBuffer,
-    IN ULONG RequestDataLength,
-    OUT PVOID ResponseDataBuffer,
-    IN ULONG ResponseDataLength,
-    OUT PULONG NumberOfBytesResponse
+    IN PVOID RequestBuffer,
+    IN ULONG RequestBufferLength,
+    OUT PVOID ResponseBuffer,
+    IN ULONG ResponseBufferLength,
+    OUT PULONG NumberOfResponse OPTIONAL,
+    OUT PNTSTATUS ResponseStatus OPTIONAL
 )
 {
     NTSTATUS Status;
+    USHORT MaxAllowedDataLength;
     SIZE_T RequestMessageLength;
-    PPORT_MESSAGE RequestMessage;
+    PREQUEST_PORT_MESSAGE RequestMessage;
 
-    if (MAX(RequestDataLength, ResponseDataLength) > ALPC_MAX_ALLOWED_DATA_LENGTH) {
+    MaxAllowedDataLength = ALPC_MAX_ALLOWED_TOTAL_LENGTH - sizeof(REQUEST_PORT_MESSAGE);
+
+    if (MAX(RequestBufferLength, ResponseBufferLength) > MaxAllowedDataLength) {
         return UaSendSectionSynchronousRequest(CommunicationPortHandle,
-                                               RequestDataBuffer,
-                                               RequestDataLength,
-                                               ResponseDataBuffer,
-                                               ResponseDataLength,
-                                               NumberOfBytesResponse);
+                                               RequestBuffer,
+                                               RequestBufferLength,
+                                               ResponseBuffer,
+                                               ResponseBufferLength,
+                                               NumberOfResponse,
+                                               ResponseStatus);
     }
 
-    RequestMessageLength = sizeof(PORT_MESSAGE) + MAX(RequestDataLength, ResponseDataLength);
+    RequestMessageLength = sizeof(REQUEST_PORT_MESSAGE) + MAX(RequestBufferLength, ResponseBufferLength);
     RequestMessage = UaAllocateZeroHeap(RequestMessageLength);
 
     if (NULL == RequestMessage) {
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    RequestMessage->u1.s1.TotalLength = (USHORT)(RequestMessageLength);
-    RequestMessage->u1.s1.DataLength = (USHORT)(RequestDataLength);
+    RequestMessage->Header.u1.s1.TotalLength = (USHORT)(RequestMessageLength);
+    RequestMessage->Header.u1.s1.DataLength = (USHORT)(RequestMessageLength - sizeof(PORT_MESSAGE));
+
+    RequestMessage->RequestBufferLength = RequestBufferLength;
+    RequestMessage->ResponseBufferLength = ResponseBufferLength;
 
     if (NULL != RequestMessage) {
-        RtlCopyMemory(RequestMessage + 1, RequestDataBuffer, RequestDataLength);
+        RtlCopyMemory(RequestMessage + 1, RequestBuffer, RequestBufferLength);
     }
 
     Status = NtAlpcSendWaitReceivePort(CommunicationPortHandle,
                                        ALPC_MSGFLG_SYNC_REQUEST,
-                                       RequestMessage,
+                                       &RequestMessage->Header,
                                        NULL,
-                                       RequestMessage,
+                                       &RequestMessage->Header,
                                        &RequestMessageLength,
                                        NULL,
                                        NULL);
 
     if (FALSE != NT_SUCCESS(Status)) {
-        *NumberOfBytesResponse = RequestMessage->u1.s1.DataLength;
-        RtlCopyMemory(ResponseDataBuffer, RequestMessage + 1, RequestMessage->u1.s1.DataLength);
+        if (NULL != NumberOfResponse) {
+            *NumberOfResponse = RequestMessage->NumberOfResponse;
+        }
+
+        if (NULL != ResponseStatus) {
+            *ResponseStatus = RequestMessage->ResponseStatus;
+        }
+
+        if (NULL != ResponseBuffer) {
+            RtlCopyMemory(ResponseBuffer, RequestMessage + 1, RequestMessage->NumberOfResponse);
+        }
     }
 
     UaFreeHeap(RequestMessage);
@@ -591,13 +726,13 @@ NTSTATUS
 NTAPI
 UaSendSectionDatagram (
     IN HANDLE CommunicationPortHandle,
-    IN PVOID DatagramDataBuffer OPTIONAL,
-    IN ULONG DatagramDataLength
+    IN PVOID DatagramBuffer OPTIONAL,
+    IN ULONG DatagramBufferLength
 )
 {
     NTSTATUS Status;
-    SIZE_T SectionDatagramMessageLength;
-    PPORT_SECTION_MESSAGE SectionDatagramMessage = NULL;
+    SIZE_T DatagramMessageLength;
+    PDATAGRAM_PORT_MESSAGE DatagramMessage = NULL;
     PALPC_MESSAGE_ATTRIBUTES MessageAttributes = NULL;
     SIZE_T MessageAttributesSize;
     SIZE_T RequiredBufferSize;
@@ -605,18 +740,18 @@ UaSendSectionDatagram (
     ALPC_HANDLE SectionHandle = NULL;
     SIZE_T ActualSectionSize;
 
-    SectionDatagramMessageLength = sizeof(PORT_SECTION_MESSAGE);
-    SectionDatagramMessage = UaAllocateZeroHeap(SectionDatagramMessageLength);
+    DatagramMessageLength = sizeof(DATAGRAM_PORT_MESSAGE);
+    DatagramMessage = UaAllocateZeroHeap(DatagramMessageLength);
 
-    if (NULL == SectionDatagramMessage) {
+    if (NULL == DatagramMessage) {
         Status = STATUS_INSUFFICIENT_RESOURCES;
         goto Cleanup;
     }
 
-    SectionDatagramMessage->MessageHeader.u1.s1.TotalLength = (USHORT)(SectionDatagramMessageLength);
-    SectionDatagramMessage->MessageHeader.u1.s1.DataLength = (USHORT)(SectionDatagramMessageLength - sizeof(PORT_MESSAGE));
+    DatagramMessage->Header.u1.s1.TotalLength = (USHORT)(DatagramMessageLength);
+    DatagramMessage->Header.u1.s1.DataLength = (USHORT)(DatagramMessageLength - sizeof(PORT_MESSAGE));
 
-    SectionDatagramMessage->ValidDataLength = DatagramDataLength;
+    DatagramMessage->DatagramBufferLength = DatagramBufferLength;
 
     MessageAttributesSize = AlpcGetHeaderSize(ALPC_MESSAGE_VIEW_ATTRIBUTE);
     MessageAttributes = UaAllocateZeroHeap(MessageAttributesSize);
@@ -638,7 +773,7 @@ UaSendSectionDatagram (
     Status = NtAlpcCreatePortSection(CommunicationPortHandle,
                                      0,
                                      NULL,
-                                     DatagramDataLength,
+                                     DatagramBufferLength,
                                      &SectionHandle,
                                      &ActualSectionSize);
 
@@ -653,7 +788,7 @@ UaSendSectionDatagram (
 
     DataViewAttribute->SectionHandle = SectionHandle;
     DataViewAttribute->ViewBase = NULL;
-    DataViewAttribute->ViewSize = DatagramDataLength;
+    DataViewAttribute->ViewSize = DatagramBufferLength;
     DataViewAttribute->Flags = 0;
 
     Status = NtAlpcCreateSectionView(CommunicationPortHandle, 0, DataViewAttribute);
@@ -662,18 +797,18 @@ UaSendSectionDatagram (
         goto Cleanup;
     }
 
-    if (NULL != DatagramDataBuffer) {
-        RtlCopyMemory(DataViewAttribute->ViewBase, DatagramDataBuffer, DatagramDataLength);
+    if (NULL != DatagramBuffer) {
+        RtlCopyMemory(DataViewAttribute->ViewBase, DatagramBuffer, DatagramBufferLength);
     }
 
     DataViewAttribute->Flags = ALPC_VIEWFLG_UNMAP_EXISTING;
 
     Status = NtAlpcSendWaitReceivePort(CommunicationPortHandle,
                                        ALPC_MSGFLG_RELEASE_MESSAGE,
-                                       &SectionDatagramMessage->MessageHeader,
+                                       &DatagramMessage->Header,
                                        MessageAttributes,
                                        NULL,
-                                       &SectionDatagramMessageLength,
+                                       &DatagramMessageLength,
                                        NULL,
                                        NULL);
 
@@ -688,7 +823,7 @@ UaSendSectionDatagram (
     RTL_ASSERT(NT_SUCCESS(Status));
 
     UaFreeHeap(MessageAttributes);
-    UaFreeHeap(SectionDatagramMessage);
+    UaFreeHeap(DatagramMessage);
 
     return STATUS_SUCCESS;
 
@@ -702,8 +837,8 @@ Cleanup:
         UaFreeHeap(MessageAttributes);
     }
 
-    if (NULL != SectionDatagramMessage) {
-        UaFreeHeap(SectionDatagramMessage);
+    if (NULL != DatagramMessage) {
+        UaFreeHeap(DatagramMessage);
     }
 
     return Status;
@@ -713,37 +848,42 @@ NTSTATUS
 NTAPI
 UaSendDatagram (
     IN HANDLE CommunicationPortHandle,
-    IN PVOID DatagramDataBuffer OPTIONAL,
-    IN ULONG DatagramDataLength
+    IN PVOID DatagramBuffer OPTIONAL,
+    IN ULONG DatagramBufferLength
 )
 {
     NTSTATUS Status;
+    USHORT MaxAllowedDataLength;
     SIZE_T DatagramMessageLength;
-    PPORT_MESSAGE DatagramMessage;
+    PDATAGRAM_PORT_MESSAGE DatagramMessage;
 
-    if (DatagramDataLength > ALPC_MAX_ALLOWED_DATA_LENGTH) {
+    MaxAllowedDataLength = ALPC_MAX_ALLOWED_TOTAL_LENGTH - sizeof(DATAGRAM_PORT_MESSAGE);
+
+    if (DatagramBufferLength > MaxAllowedDataLength) {
         return UaSendSectionDatagram(CommunicationPortHandle,
-                                     DatagramDataBuffer,
-                                     DatagramDataLength);
+                                     DatagramBuffer,
+                                     DatagramBufferLength);
     }
 
-    DatagramMessageLength = sizeof(PORT_MESSAGE) + DatagramDataLength;
+    DatagramMessageLength = sizeof(DATAGRAM_PORT_MESSAGE) + DatagramBufferLength;
     DatagramMessage = UaAllocateZeroHeap(DatagramMessageLength);
 
     if (NULL == DatagramMessage) {
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    DatagramMessage->u1.s1.TotalLength = (USHORT)(DatagramMessageLength);
-    DatagramMessage->u1.s1.DataLength = (USHORT)(DatagramDataLength);
+    DatagramMessage->Header.u1.s1.TotalLength = (USHORT)(DatagramMessageLength);
+    DatagramMessage->Header.u1.s1.DataLength = (USHORT)(DatagramMessageLength - sizeof(PORT_MESSAGE));
 
-    if (NULL != DatagramDataBuffer) {
-        RtlCopyMemory(DatagramMessage + 1, DatagramDataBuffer, DatagramDataLength);
+    DatagramMessage->DatagramBufferLength = DatagramBufferLength;
+
+    if (NULL != DatagramBuffer) {
+        RtlCopyMemory(DatagramMessage + 1, DatagramBuffer, DatagramBufferLength);
     }
 
     Status = NtAlpcSendWaitReceivePort(CommunicationPortHandle,
                                        ALPC_MSGFLG_RELEASE_MESSAGE,
-                                       DatagramMessage,
+                                       &DatagramMessage->Header,
                                        NULL,
                                        NULL,
                                        &DatagramMessageLength,
@@ -769,32 +909,37 @@ NTAPI
 UaConnectServer (
     OUT PHANDLE CommunicationPortHandle,
     IN PUNICODE_STRING ServerPortName,
-    IN PVOID ConnectionDataBuffer OPTIONAL,
-    IN USHORT ConnectionDataLength
+    IN PVOID ConnectionBuffer OPTIONAL,
+    IN USHORT ConnectionBufferLength
 )
 {
     NTSTATUS Status;
+    USHORT MaxAllowedDataLength;
     SIZE_T ConnectionMessageLength;
-    PPORT_MESSAGE ConnectionMessage;
+    PCONNECTION_PORT_MESSAGE ConnectionMessage;
     OBJECT_ATTRIBUTES ObjectAttributes;
     ALPC_PORT_ATTRIBUTES PortAttributes;
 
-    if (ConnectionDataLength > ALPC_MAX_ALLOWED_DATA_LENGTH) {
+    MaxAllowedDataLength = ALPC_MAX_ALLOWED_TOTAL_LENGTH - sizeof(CONNECTION_PORT_MESSAGE);
+
+    if (ConnectionBufferLength > MaxAllowedDataLength) {
         return STATUS_BUFFER_OVERFLOW;
     }
 
-    ConnectionMessageLength = sizeof(PORT_MESSAGE) + ConnectionDataLength;
+    ConnectionMessageLength = sizeof(CONNECTION_PORT_MESSAGE) + ConnectionBufferLength;
     ConnectionMessage = UaAllocateZeroHeap(ConnectionMessageLength);
 
     if (NULL == ConnectionMessage) {
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    ConnectionMessage->u1.s1.TotalLength = (USHORT)(ConnectionMessageLength);
-    ConnectionMessage->u1.s1.DataLength = ConnectionDataLength;
+    ConnectionMessage->Header.u1.s1.TotalLength = (USHORT)(ConnectionMessageLength);
+    ConnectionMessage->Header.u1.s1.DataLength = (USHORT)(ConnectionMessageLength - sizeof(PORT_MESSAGE));
 
-    if (NULL != ConnectionDataBuffer) {
-        RtlCopyMemory(ConnectionMessage + 1, ConnectionDataBuffer, ConnectionDataLength);
+    ConnectionMessage->ConnectionBufferLength = ConnectionBufferLength;
+
+    if (NULL != ConnectionBuffer) {
+        RtlCopyMemory(ConnectionMessage + 1, ConnectionBuffer, ConnectionBufferLength);
     }
 
     InitializeObjectAttributes(&ObjectAttributes,
@@ -811,7 +956,7 @@ UaConnectServer (
                                &PortAttributes,
                                ALPC_MSGFLG_SYNC_REQUEST,
                                NULL,
-                               ConnectionMessage,
+                               &ConnectionMessage->Header,
                                &ConnectionMessageLength,
                                NULL,
                                NULL,
@@ -820,4 +965,79 @@ UaConnectServer (
     UaFreeHeap(ConnectionMessage);
 
     return Status;
+}
+
+NTSTATUS
+NTAPI
+OnRequest (
+    IN PCLIENT_ID ClientId,
+    IN OUT PVOID ShareBuffer,
+    IN ULONG RequestBufferLength,
+    IN ULONG ResponseBufferLength,
+    OUT PULONG NumberOfResponse
+)
+{
+    return STATUS_UNSUCCESSFUL;
+}
+
+VOID
+NTAPI
+OnDatagram (
+    IN PCLIENT_ID ClientId,
+    IN PVOID DatagramBuffer,
+    IN ULONG DatagramBufferLength
+)
+{
+    
+}
+
+BOOLEAN
+NTAPI
+OnConnect (
+    IN PCLIENT_ID ClientId,
+    IN PVOID ConnectionBuffer,
+    IN USHORT ConnectionBufferLength
+)
+{
+    return TRUE;
+}
+
+UNICODE_STRING TestPortName = RTL_CONSTANT_STRING(L"\\TestPortName");
+
+int main(int argc, char *argv[])
+{
+    getchar();
+    PUA_SERVER Server = UaCreateServer(&TestPortName, OnRequest, OnDatagram, OnConnect);
+
+    Sleep(200);
+
+    HANDLE CommunicationPortHandle;
+    NTSTATUS Status = UaConnectServer(&CommunicationPortHandle, &TestPortName, NULL, 0);
+
+    UCHAR Data[ALPC_MAX_ALLOWED_TOTAL_LENGTH] = { 0x11, 0x22, 0x33, 0x44 };
+
+    for (int i = 0; i < 100000; i++) {
+        UaSendDatagram(CommunicationPortHandle, Data, RTL_NUMBER_OF(Data));
+    }
+
+    printf("Datagram test end...\n");
+
+    for (int i = 0; i < 100000; i++) {
+        ULONG NumberOfResponse;
+        UaSendSynchronousRequest(CommunicationPortHandle,
+                                 Data,
+                                 RTL_NUMBER_OF(Data),
+                                 Data,
+                                 RTL_NUMBER_OF(Data),
+                                 &NumberOfResponse,
+                                 NULL);
+    }
+
+    printf("Request test end...\n");
+    getchar();
+    UaDisconnectServer(CommunicationPortHandle);
+    UaTerminateServer(Server);
+
+    getchar();
+    return 0;
 }

@@ -3,44 +3,33 @@
 
 EXTERN_C_START
 
-typedef struct _PORT_CONTEXT {
-    CLIENT_ID ClientId;
-    HANDLE CommunicationPortHandle;
-} PORT_CONTEXT, *PPORT_CONTEXT;
-
-typedef struct _PORT_SECTION_MESSAGE {
-    PORT_MESSAGE MessageHeader;
-    ULONG ValidDataLength;
-} PORT_SECTION_MESSAGE, *PPORT_SECTION_MESSAGE;
+typedef struct _UA_SERVER *PUA_SERVER;
 
 typedef
-VOID
+NTSTATUS
 (NTAPI *REQUEST_PROCEDURE)(
-    IN OUT PPORT_MESSAGE PortMessage
+    IN PCLIENT_ID ClientId,
+    IN OUT PVOID ShareBuffer,
+    IN ULONG RequestBufferLength,
+    IN ULONG ResponseBufferLength,
+    OUT PULONG NumberOfResponse
     );
 
 typedef
 VOID
 (NTAPI *DATAGRAM_PROCEDURE)(
-    IN PPORT_MESSAGE PortMessage
+    IN PCLIENT_ID ClientId,
+    IN PVOID DatagramBuffer,
+    IN ULONG DatagramBufferLength
     );
 
 typedef
 BOOLEAN
 (NTAPI *CONNECTION_PROCEDURE)(
-    IN PPORT_MESSAGE PortMessage
+    IN PCLIENT_ID ClientId,
+    IN PVOID ConnectionBuffer,
+    IN USHORT ConnectionBufferLength
     );
-
-typedef struct _UA_SERVER {
-    REQUEST_PROCEDURE OnRequest;
-    DATAGRAM_PROCEDURE OnDatagram;
-    CONNECTION_PROCEDURE OnConnect;
-    PPORT_MESSAGE PortMessage;
-    ALPC_PORT_ATTRIBUTES PortAttributes;
-    PALPC_MESSAGE_ATTRIBUTES MessageAttributes;
-    HANDLE ConnectionPortHandle;
-    HANDLE ServerThreadHandle;
-} UA_SERVER, *PUA_SERVER;
 
 VOID
 NTAPI
@@ -61,19 +50,20 @@ NTSTATUS
 NTAPI
 UaSendSynchronousRequest (
     IN HANDLE CommunicationPortHandle,
-    IN PVOID RequestDataBuffer,
-    IN ULONG RequestDataLength,
-    OUT PVOID ResponseDataBuffer,
-    IN ULONG ResponseDataLength,
-    OUT PULONG NumberOfBytesResponse
+    IN PVOID RequestBuffer,
+    IN ULONG RequestBufferLength,
+    OUT PVOID ResponseBuffer,
+    IN ULONG ResponseBufferLength,
+    OUT PULONG NumberOfResponse OPTIONAL,
+    OUT PNTSTATUS ResponseStatus OPTIONAL
 );
 
 NTSTATUS
 NTAPI
 UaSendDatagram (
     IN HANDLE CommunicationPortHandle,
-    IN PVOID DatagramDataBuffer OPTIONAL,
-    IN ULONG DatagramDataLength
+    IN PVOID DatagramBuffer OPTIONAL,
+    IN ULONG DatagramBufferLength
 );
 
 VOID
@@ -87,8 +77,8 @@ NTAPI
 UaConnectServer (
     OUT PHANDLE CommunicationPortHandle,
     IN PUNICODE_STRING ServerPortName,
-    IN PVOID ConnectionDataBuffer OPTIONAL,
-    IN USHORT ConnectionDataLength
+    IN PVOID ConnectionBuffer OPTIONAL,
+    IN USHORT ConnectionBufferLength
 );
 
 EXTERN_C_END
