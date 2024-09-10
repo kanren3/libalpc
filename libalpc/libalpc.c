@@ -116,7 +116,6 @@ UaAlpcRequestHandler (
     PREQUEST_PORT_MESSAGE RequestMessage;
     ULONG MaxBufferLength;
     ULONG TotalLength;
-    PVOID ShareBuffer;
 
     DataViewAttribute = AlpcGetMessageAttribute(Server->MessageAttributes, ALPC_MESSAGE_VIEW_ATTRIBUTE);
     RTL_ASSERT(NULL != DataViewAttribute);
@@ -127,17 +126,14 @@ UaAlpcRequestHandler (
 
     if (0 != (Server->MessageAttributes->ValidAttributes & ALPC_MESSAGE_VIEW_ATTRIBUTE)) {
         if (MaxBufferLength <= DataViewAttribute->ViewSize) {
-            ShareBuffer = DataViewAttribute->ViewBase;
-
             Status = Server->OnRequest(&RequestMessage->Header.ClientId,
-                                       ShareBuffer,
+                                       DataViewAttribute->ViewBase,
                                        RequestMessage->RequestBufferLength,
                                        RequestMessage->ResponseBufferLength,
                                        &RequestMessage->NumberOfResponse);
 
             RequestMessage->ResponseStatus = Status;
         }
-
 
         Status = NtAlpcDeleteSectionView(Server->ConnectionPortHandle, 0, DataViewAttribute->ViewBase);
         RTL_ASSERT(NT_SUCCESS(Status));
@@ -146,10 +142,8 @@ UaAlpcRequestHandler (
         TotalLength = (USHORT)(RequestMessage->Header.u1.s1.TotalLength);
 
         if (MaxBufferLength + sizeof(REQUEST_PORT_MESSAGE) == TotalLength) {
-            ShareBuffer = RequestMessage + 1;
-
             Status = Server->OnRequest(&RequestMessage->Header.ClientId,
-                                       ShareBuffer,
+                                       RequestMessage + 1,
                                        RequestMessage->RequestBufferLength,
                                        RequestMessage->ResponseBufferLength,
                                        &RequestMessage->NumberOfResponse);
@@ -178,7 +172,6 @@ UaAlpcDatagramHandler (
     PALPC_DATA_VIEW_ATTR DataViewAttribute;
     PALPC_CONTEXT_ATTR ContextAttribute;
     PDATAGRAM_PORT_MESSAGE DatagramMessage;
-    PVOID DatagramBuffer;
     ULONG TotalLength;
 
     DataViewAttribute = AlpcGetMessageAttribute(Server->MessageAttributes, ALPC_MESSAGE_VIEW_ATTRIBUTE);
@@ -191,10 +184,8 @@ UaAlpcDatagramHandler (
 
     if (0 != (Server->MessageAttributes->ValidAttributes & ALPC_MESSAGE_VIEW_ATTRIBUTE)) {
         if (DatagramMessage->DatagramBufferLength <= DataViewAttribute->ViewSize) {
-            DatagramBuffer = DataViewAttribute->ViewBase;
-
             Server->OnDatagram(&DatagramMessage->Header.ClientId,
-                               DatagramBuffer,
+                               DataViewAttribute->ViewBase,
                                DatagramMessage->DatagramBufferLength);
         }
 
@@ -216,10 +207,8 @@ UaAlpcDatagramHandler (
         TotalLength = (USHORT)(DatagramMessage->Header.u1.s1.TotalLength);
 
         if (DatagramMessage->DatagramBufferLength + sizeof(DATAGRAM_PORT_MESSAGE) == TotalLength) {
-            DatagramBuffer = DatagramMessage + 1;
-
             Server->OnDatagram(&DatagramMessage->Header.ClientId,
-                               DatagramBuffer,
+                               DatagramMessage + 1,
                                DatagramMessage->DatagramBufferLength);
         }
 
