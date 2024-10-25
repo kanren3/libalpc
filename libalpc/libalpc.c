@@ -334,21 +334,21 @@ UaProcessMessage (
 )
 {
     switch (LOBYTE(Server->PortMessage->u2.s2.Type)) {
-    case LPC_REQUEST:
-        UaAlpcRequestHandler(Server);
-        break;
-    case LPC_DATAGRAM:
-        UaAlpcDatagramHandler(Server);
-        break;
-    case LPC_PORT_CLOSED:
-        UaAlpcDisconnectHandler(Server);
-        break;
-    case LPC_CLIENT_DIED:
-        UaAlpcDisconnectHandler(Server);
-        break;
-    case LPC_CONNECTION_REQUEST:
-        UaAlpcConnectHandler(Server);
-        break;
+        case LPC_REQUEST:
+            UaAlpcRequestHandler(Server);
+            break;
+        case LPC_DATAGRAM:
+            UaAlpcDatagramHandler(Server);
+            break;
+        case LPC_PORT_CLOSED:
+            UaAlpcDisconnectHandler(Server);
+            break;
+        case LPC_CLIENT_DIED:
+            UaAlpcDisconnectHandler(Server);
+            break;
+        case LPC_CONNECTION_REQUEST:
+            UaAlpcConnectHandler(Server);
+            break;
     }
 }
 
@@ -881,7 +881,7 @@ UaSendDatagram (
 
     UaFreeHeap(DatagramMessage);
 
-    return STATUS_SUCCESS;
+    return Status;
 }
 
 VOID
